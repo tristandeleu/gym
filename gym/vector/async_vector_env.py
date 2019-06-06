@@ -40,21 +40,27 @@ class AsyncVectorEnv(VectorEnv):
         If `True`, then the `reset` and `step` methods return a copy of the
         observations.
 
+    max_retries : int (default: 0)
+        Maximum number of times `AsyncVectorEnv` tries to restart a process if
+        it fails. If `None`, then it always tries to restart a failing process.
+
     context : str, optional
         Context for multiprocessing. If `None`, then the default context is used.
         Only available in Python 3.
     """
     def __init__(self, env_fns, observation_space=None, action_space=None,
-                 shared_memory=True, copy=True, context=None):
+                 shared_memory=True, copy=True, max_retries=0, context=None):
         try:
-            ctx = mp.get_context(context)
+            self.ctx = mp.get_context(context)
         except AttributeError:
             logger.warn('Context switching for `multiprocessing` is not '
                 'available in Python 2. Using the default context.')
-            ctx = mp
+            self.ctx = mp
         self.env_fns = env_fns
         self.shared_memory = shared_memory
         self.copy = copy
+        self.max_retries = max_retries
+        self._num_retries = 0
 
         if (observation_space is None) or (action_space is None):
             dummy_env = env_fns[0]()
@@ -66,32 +72,22 @@ class AsyncVectorEnv(VectorEnv):
             observation_space=observation_space, action_space=action_space)
 
         if self.shared_memory:
-            _obs_buffer = create_shared_memory(self.single_observation_space,
-                n=self.num_envs)
-            self.observations = read_from_shared_memory(_obs_buffer,
+            self._obs_buffer = create_shared_memory(
+                self.single_observation_space, n=self.num_envs)
+            self.observations = read_from_shared_memory(self._obs_buffer,
                 self.single_observation_space, n=self.num_envs)
         else:
-            _obs_buffer = None
-            self.observations = create_empty_array(self.single_observation_space,
-                n=self.num_envs, fn=np.empty)
+            self._obs_buffer = None
+            self.observations = create_empty_array(
+                self.single_observation_space, n=self.num_envs, fn=np.empty)
 
         self.parent_pipes, self.processes = [], []
-        self.error_queue = ctx.Queue()
-        target = _worker_shared_memory if self.shared_memory else _worker
+        self.error_queue = self.ctx.Queue()
         with clear_mpi_env_vars():
-            for idx, env_fn in enumerate(self.env_fns):
-                parent_pipe, child_pipe = ctx.Pipe()
-                process = ctx.Process(target=target,
-                    name='Worker<{0}>-{1}'.format(type(self).__name__, idx),
-                    args=(idx, CloudpickleWrapper(env_fn), child_pipe,
-                    parent_pipe, _obs_buffer, self.error_queue))
-
+            for index in range(self.num_envs):
+                process, parent_pipe = self._start_process(index)
                 self.parent_pipes.append(parent_pipe)
                 self.processes.append(process)
-
-                process.deamon = True
-                process.start()
-                child_pipe.close()
 
         self.waiting_reset = False
         self.waiting_step = False
@@ -158,9 +154,9 @@ class AsyncVectorEnv(VectorEnv):
             raise mp.TimeoutError('The call to `reset_wait` has timed out after '
                 '{0} second{1}.'.format(timeout, 's' if timeout > 1 else ''))
 
+        self._restart_if_errors(reset=True)
         observations_list = [pipe.recv() for pipe in self.parent_pipes]
         self.waiting_reset = False
-        self._raise_if_errors()
 
         if not self.shared_memory:
             concatenate(observations_list, self.observations,
@@ -232,9 +228,9 @@ class AsyncVectorEnv(VectorEnv):
             raise mp.TimeoutError('The call to `step_wait` has timed out after '
                 '{0} second{1}.'.format(timeout, 's' if timeout > 1 else ''))
 
+        self._restart_if_errors(reset=False)
         results = [pipe.recv() for pipe in self.parent_pipes]
         self.waiting_step = False
-        self._raise_if_errors()
         observations_list, rewards, dones, infos = zip(*results)
 
         if not self.shared_memory:
@@ -304,17 +300,43 @@ class AsyncVectorEnv(VectorEnv):
             raise ClosedEnvironmentError('Trying to operate on `{0}`, after a '
                 'call to `close()`.'.format(type(self).__name__))
 
-    def _raise_if_errors(self):
+    def _restart_if_errors(self, reset=True):
         if not self.error_queue.empty():
             while not self.error_queue.empty():
                 index, exctype, value = self.error_queue.get()
                 logger.error('Received the following error from Worker-{0}: '
                     '{1}: {2}'.format(index, exctype.__name__, value))
-                logger.error('Shutting down Worker-{0}.'.format(index))
-                self.parent_pipes[index].close()
-                self.parent_pipes[index] = None
-            logger.error('Raising the last exception back to the main process.')
-            raise exctype(value)
+
+                if (self.max_retries is not None) \
+                        and (self._num_retries >= self.max_retries):
+                    for pipe in self.parent_pipes:
+                        pipe.recv()
+                    logger.error('The maximum number of retries has been '
+                        'reached. Raising the last exception back to the main '
+                        'process.')
+                    raise exctype(value)
+
+                logger.warn('Restarting Worker-{0}...'.format(index))
+                process, parent_pipe = self._start_process(index)
+                parent_pipe.send(('_restart', reset))
+
+                self.processes[index] = process
+                self.parent_pipes[index] = parent_pipe
+                self._num_retries += 1
+
+    def _start_process(self, index):
+        target = _worker_shared_memory if self.shared_memory else _worker
+        parent_pipe, child_pipe = self.ctx.Pipe()
+        process = self.ctx.Process(target=target,
+            name='Worker<{0}>-{1}'.format(type(self).__name__, index),
+            args=(index, CloudpickleWrapper(self.env_fns[index]), child_pipe,
+            parent_pipe, self._obs_buffer, self.error_queue))
+
+        process.deamon = True
+        process.start()
+        child_pipe.close()
+
+        return process, parent_pipe
 
     def __del__(self):
         if hasattr(self, 'closed'):
@@ -351,10 +373,17 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue):
                     is_observation_space_equal = False
                     raise
                 pipe.send(is_observation_space_equal)
+            elif command == '_restart':
+                observation = env.reset()
+                if data:
+                    pipe.send(observation)
+                else:
+                    infos = {'AsyncVectorEnv.restart': True}
+                    pipe.send((observation, 0., True, infos))
             else:
                 raise RuntimeError('Received unknown command `{0}`. Must '
                     'be one of {`reset`, `step`, `seed`, `close`, '
-                    '`_check_observation_space`}.'.format(command))
+                    '`_check_observation_space`, `_restart`}.'.format(command))
     except Exception:
         import sys
         error_queue.put((index,) + sys.exc_info()[:2])
@@ -396,10 +425,19 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory, error
                     # Equality between Box spaces does not check for shape equality
                     is_observation_space_equal = False
                 pipe.send(is_observation_space_equal)
+            elif command == '_restart':
+                observation = env.reset()
+                write_to_shared_memory(index, observation, shared_memory,
+                                       observation_space)
+                if data:
+                    pipe.send(None)
+                else:
+                    infos = {'AsyncVectorEnv.restart': True}
+                    pipe.send((None, 0., True, infos))
             else:
                 raise RuntimeError('Received unknown command `{0}`. Must '
                     'be one of {`reset`, `step`, `seed`, `close`, '
-                    '`_check_observation_space`}.'.format(command))
+                    '`_check_observation_space`, `_restart`}.'.format(command))
     except Exception:
         import sys
         error_queue.put((index,) + sys.exc_info()[:2])

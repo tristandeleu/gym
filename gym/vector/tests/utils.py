@@ -42,6 +42,9 @@ class UnittestSlowEnv(gym.Env):
         return self.observation_space.sample()
 
     def step(self, action):
+        if (action < 0.):
+            raise ValueError('The duration must be positive, got '
+                '`{0}`.'.format(action))
         time.sleep(action)
         observation = self.observation_space.sample()
         reward, done = 0., False
