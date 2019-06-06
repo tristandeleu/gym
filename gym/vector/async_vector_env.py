@@ -44,12 +44,19 @@ class AsyncVectorEnv(VectorEnv):
         Maximum number of times `AsyncVectorEnv` tries to restart a process if
         it fails. If `None`, then it always tries to restart a failing process.
 
+    episodic : bool (default: `False`)
+        If `True`, then the environments run for a single episode (until
+        `done=True`), and subsequent calls to `step` have an unexpected
+        behaviour. If `False`, then the environments call `reset` at the end of
+        each episode.
+
     context : str, optional
         Context for multiprocessing. If `None`, then the default context is used.
         Only available in Python 3.
     """
     def __init__(self, env_fns, observation_space=None, action_space=None,
-                 shared_memory=True, copy=True, max_retries=0, context=None):
+                 shared_memory=True, copy=True, max_retries=0,
+                 episodic=False, context=None):
         try:
             self.ctx = mp.get_context(context)
         except AttributeError:
@@ -60,6 +67,7 @@ class AsyncVectorEnv(VectorEnv):
         self.shared_memory = shared_memory
         self.copy = copy
         self.max_retries = max_retries
+        self.episodic = episodic
         self._num_retries = 0
 
         if (observation_space is None) or (action_space is None):
@@ -330,7 +338,7 @@ class AsyncVectorEnv(VectorEnv):
         process = self.ctx.Process(target=target,
             name='Worker<{0}>-{1}'.format(type(self).__name__, index),
             args=(index, CloudpickleWrapper(self.env_fns[index]), child_pipe,
-            parent_pipe, self._obs_buffer, self.error_queue))
+            parent_pipe, self._obs_buffer, self.error_queue, self.episodic))
 
         process.deamon = True
         process.start()
@@ -344,20 +352,34 @@ class AsyncVectorEnv(VectorEnv):
                 self.close(terminate=True)
 
 
-def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue):
+def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue,
+            episodic):
     assert shared_memory is None
     env = env_fn()
+    _zero_observation = create_empty_array(env.observation_space, n=None,
+                                           fn=np.zeros)
+    episode_done = False
     parent_pipe.close()
     try:
         while True:
             command, data = pipe.recv()
             if command == 'reset':
                 observation = env.reset()
+                episode_done = False
                 pipe.send(observation)
             elif command == 'step':
-                observation, reward, done, info = env.step(data)
-                if done:
-                    observation = env.reset()
+                if episodic and episode_done:
+                    observation = _zero_observation
+                    reward, done, info = 0., True, {}
+                else:
+                    observation, reward, done, info = env.step(data)
+                    if done:
+                        if episodic:
+                            observation = _zero_observation
+                            episode_done = True
+                            info.update({'AsyncVectorEnv.end_episode': True})
+                        else:
+                            observation = env.reset()
                 pipe.send((observation, reward, done, info))
             elif command == 'seed':
                 env.seed(data)
@@ -375,6 +397,7 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue):
                 pipe.send(is_observation_space_equal)
             elif command == '_restart':
                 observation = env.reset()
+                episode_done = True
                 if data:
                     pipe.send(observation)
                 else:
@@ -392,10 +415,13 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue):
         env.close()
 
 
-def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory, error_queue):
+def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory,
+                          error_queue, episodic):
     assert shared_memory is not None
     env = env_fn()
     observation_space = env.observation_space
+    _zero_observation = create_empty_array(observation_space, n=None, fn=np.zeros)
+    episode_done = False
     parent_pipe.close()
     try:
         while True:
@@ -404,11 +430,21 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory, error
                 observation = env.reset()
                 write_to_shared_memory(index, observation, shared_memory,
                                        observation_space)
+                episode_done = False
                 pipe.send(None)
             elif command == 'step':
-                observation, reward, done, info = env.step(data)
-                if done:
-                    observation = env.reset()
+                if episodic and episode_done:
+                    observation = _zero_observation
+                    reward, done, info = 0., True, {}
+                else:
+                    observation, reward, done, info = env.step(data)
+                    if done:
+                        if episodic:
+                            observation = _zero_observation
+                            episode_done = True
+                            info.update({'AsyncVectorEnv.end_episode': True})
+                        else:
+                            observation = env.reset()
                 write_to_shared_memory(index, observation, shared_memory,
                                        observation_space)
                 pipe.send((None, reward, done, info))
