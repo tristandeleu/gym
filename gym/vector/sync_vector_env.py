@@ -54,6 +54,16 @@ class SyncVectorEnv(VectorEnv):
         self._zero_observation = create_empty_array(self.single_observation_space,
             n=None, fn=np.zeros)
 
+    def seed(self, seeds=None):
+        if seeds is None:
+            seeds = [None for _ in range(self.num_envs)]
+        if isinstance(seeds, int):
+            seeds = [seeds + i for i in range(self.num_envs)]
+        assert len(seeds) == self.num_envs
+
+        for env, seed in zip(self.envs, seeds):
+            env.seed(seed)
+
     def reset(self):
         self._dones[:] = False
         observations = []
@@ -80,7 +90,7 @@ class SyncVectorEnv(VectorEnv):
                     observation = self._zero_observation
                     info.update({'SyncVectorEnv.end_episode': True})
                 else:
-                    observation =  self.env[i].reset()
+                    observation = self.envs[i].reset()
 
             observations.append(observation)
             infos.append(info)
