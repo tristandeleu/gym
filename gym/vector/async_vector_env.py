@@ -2,6 +2,7 @@ import numpy as np
 import multiprocessing as mp
 import time
 import sys
+from enum import Enum
 from copy import deepcopy
 
 from gym import logger
@@ -13,6 +14,12 @@ from gym.vector.utils import (create_shared_memory, create_empty_array,
                               concatenate, CloudpickleWrapper, clear_mpi_env_vars)
 
 __all__ = ['AsyncVectorEnv']
+
+
+class AsyncState(Enum):
+    DEFAULT = 0
+    WAITING_RESET = 1
+    WAITING_STEP = 2
 
 
 class AsyncVectorEnv(VectorEnv):
@@ -98,8 +105,7 @@ class AsyncVectorEnv(VectorEnv):
                 self.parent_pipes.append(parent_pipe)
                 self.processes.append(process)
 
-        self.waiting_reset = False
-        self.waiting_step = False
+        self._state = AsyncState.DEFAULT
         self._check_observation_spaces()
 
     def seed(self, seeds=None):
@@ -117,17 +123,17 @@ class AsyncVectorEnv(VectorEnv):
 
     def reset_async(self):
         self._assert_is_running()
-        if self.waiting_step:
+        if self._state == AsyncState.WAITING_STEP:
             raise AlreadySteppingError('Calling `reset_async` while waiting '
                 'for a pending call to `step` to complete.')
 
-        if self.waiting_reset:
+        if self._state == AsyncState.WAITING_RESET:
             raise AlreadyResettingError('Calling `reset_async` while waiting '
                 'for a pending call to `reset` to complete.')
 
         for pipe in self.parent_pipes:
             pipe.send(('reset', None))
-        self.waiting_reset = True
+        self._state = AsyncState.WAITING_RESET
 
     def reset_wait(self, timeout=None):
         """
@@ -143,18 +149,18 @@ class AsyncVectorEnv(VectorEnv):
             A batch of observations from the vectorized environment.
         """
         self._assert_is_running()
-        if self.waiting_step or (not self.waiting_reset):
+        if self._state != AsyncState.WAITING_RESET:
             raise NotResettingError('Calling `reset_wait` without any prior '
                 'call to `reset_async`.')
 
         if not self.poll(timeout):
-            self.waiting_reset = False
+            self._state = AsyncState.DEFAULT
             raise mp.TimeoutError('The call to `reset_wait` has timed out after '
                 '{0} second{1}.'.format(timeout, 's' if timeout > 1 else ''))
 
         self._restart_if_errors(reset=True)
         observations_list = [pipe.recv() for pipe in self.parent_pipes]
-        self.waiting_reset = False
+        self._state = AsyncState.DEFAULT
 
         if not self.shared_memory:
             concatenate(observations_list, self.observations,
@@ -170,17 +176,17 @@ class AsyncVectorEnv(VectorEnv):
             List of actions.
         """
         self._assert_is_running()
-        if self.waiting_reset:
+        if self._state == AsyncState.WAITING_RESET:
             raise AlreadyResettingError('Calling `step_async` while waiting '
                 'for a pending call to `reset` to complete.')
 
-        if self.waiting_step:
+        if self._state == AsyncState.WAITING_STEP:
             raise AlreadySteppingError('Calling `step_async` while waiting for '
                 'a pending call to `step` to complete.')
 
         for pipe, action in zip(self.parent_pipes, actions):
             pipe.send(('step', action))
-        self.waiting_step = True
+        self._state = AsyncState.WAITING_STEP
 
     def step_wait(self, timeout=None):
         """
@@ -205,18 +211,18 @@ class AsyncVectorEnv(VectorEnv):
             A list of auxiliary diagnostic informations.
         """
         self._assert_is_running()
-        if self.waiting_reset or not self.waiting_step:
+        if self._state != AsyncState.WAITING_STEP:
             raise NotSteppingError('Calling `step_wait` without any prior call '
                 'to `step_async`.')
 
         if not self.poll(timeout):
-            self.waiting_step = False
+            self._state = AsyncState.DEFAULT
             raise mp.TimeoutError('The call to `step_wait` has timed out after '
                 '{0} second{1}.'.format(timeout, 's' if timeout > 1 else ''))
 
         self._restart_if_errors(reset=False)
         results = [pipe.recv() for pipe in self.parent_pipes]
-        self.waiting_step = False
+        self._state = AsyncState.DEFAULT
         observations_list, rewards, dones, infos = zip(*results)
 
         if not self.shared_memory:
@@ -243,12 +249,12 @@ class AsyncVectorEnv(VectorEnv):
     def close_extras(self, timeout=None, terminate=False):
         timeout = 0 if terminate else timeout
         try:
-            if self.waiting_reset:
+            if self._state == AsyncState.WAITING_RESET:
                 logger.warn('Calling `close` while waiting for a pending '
                     'call to `reset` to complete.')
                 self.reset_wait(timeout)
 
-            if self.waiting_step:
+            if self._state == AsyncState.WAITING_STEP:
                 logger.warn('Calling `close` while waiting for a pending '
                     'call to `step` to complete.')
                 self.step_wait(timeout)
@@ -295,8 +301,7 @@ class AsyncVectorEnv(VectorEnv):
 
                 if (self.max_retries is not None) \
                         and (self._num_retries >= self.max_retries):
-                    for pipe in self.parent_pipes:
-                        pipe.recv()
+                    self._state = AsyncState.DEFAULT
                     logger.error('The maximum number of retries has been '
                         'reached. Raising the last exception back to the main '
                         'process.')
