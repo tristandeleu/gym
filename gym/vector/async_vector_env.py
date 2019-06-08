@@ -388,13 +388,7 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue,
                 pipe.send(None)
                 break
             elif command == '_check_observation_space':
-                try:
-                    is_observation_space_equal = (data == env.observation_space)
-                except ValueError:
-                    # Equality between Box spaces does not check for shape equality
-                    is_observation_space_equal = False
-                    raise
-                pipe.send(is_observation_space_equal)
+                pipe.send(data == env.observation_space)
             elif command == '_restart':
                 observation = env.reset()
                 episode_done = True
@@ -455,12 +449,7 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory,
                 pipe.send(None)
                 break
             elif command == '_check_observation_space':
-                try:
-                    is_observation_space_equal = (data == observation_space)
-                except ValueError:
-                    # Equality between Box spaces does not check for shape equality
-                    is_observation_space_equal = False
-                pipe.send(is_observation_space_equal)
+                pipe.send(data == observation_space)
             elif command == '_restart':
                 observation = env.reset()
                 write_to_shared_memory(index, observation, shared_memory,
