@@ -109,6 +109,16 @@ class AsyncVectorEnv(VectorEnv):
         self._check_observation_spaces()
 
     def seed(self, seeds=None):
+        """
+        Parameters
+        ----------
+        seeds : list of int, or int, optional
+            Random seed for each individual environment. If `seeds` is a list of
+            length `num_envs`, then the items of the list are chosen as random
+            seeds. If `seeds` is an int, then each environment uses the random
+            seed `seeds + n`, where `n` is the index of the environment (between
+            `0` and `num_envs - 1`).
+        """
         self._assert_is_running()
         if seeds is None:
             seeds = [None for _ in range(self.num_envs)]
@@ -139,7 +149,7 @@ class AsyncVectorEnv(VectorEnv):
         """
         Parameters
         ----------
-        timeout : int, optional
+        timeout : int or float, optional
             Number of seconds before the call to `reset_wait` times out. If
             `None`, the call to `reset_wait` never times out.
 
@@ -192,7 +202,7 @@ class AsyncVectorEnv(VectorEnv):
         """
         Parameters
         ----------
-        timeout : int, optional
+        timeout : int or float, optional
             Number of seconds before the call to `step_wait` times out. If
             `None`, the call to `step_wait` never times out.
 
@@ -233,6 +243,18 @@ class AsyncVectorEnv(VectorEnv):
                 np.array(rewards), np.array(dones, dtype=np.bool_), infos)
 
     def close(self, timeout=None, terminate=False):
+        """
+        Parameters
+        ----------
+        timeout : int or float, optional
+            Number of seconds before the call to `close` times out. If `None`,
+            the call to `close` never times out. If the call to `close` times
+            out, then all processes are terminated.
+
+        terminate : bool (default: `False`)
+            If `True`, then the `close` operation is forced and all processes
+            are terminated.
+        """
         if self.closed:
             return
 

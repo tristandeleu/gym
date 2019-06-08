@@ -55,6 +55,16 @@ class SyncVectorEnv(VectorEnv):
             n=None, fn=np.zeros)
 
     def seed(self, seeds=None):
+        """
+        Parameters
+        ----------
+        seeds : list of int, or int, optional
+            Random seed for each individual environment. If `seeds` is a list of
+            length `num_envs`, then the items of the list are chosen as random
+            seeds. If `seeds` is an int, then each environment uses the random
+            seed `seeds + n`, where `n` is the index of the environment (between
+            `0` and `num_envs - 1`).
+        """
         if seeds is None:
             seeds = [None for _ in range(self.num_envs)]
         if isinstance(seeds, int):
@@ -65,6 +75,12 @@ class SyncVectorEnv(VectorEnv):
             env.seed(seed)
 
     def reset(self):
+        """
+        Returns
+        -------
+        observations : sample from `observation_space`
+            A batch of observations from the vectorized environment.
+        """
         self._dones[:] = False
         observations = []
         for i in range(self.num_envs):
@@ -75,6 +91,26 @@ class SyncVectorEnv(VectorEnv):
         return np.copy(self.observations) if self.copy else self.observations
 
     def step(self, actions):
+        """
+        Parameters
+        ----------
+        actions : iterable of samples from `action_space`
+            List of actions.
+
+        Returns
+        -------
+        observations : sample from `observation_space`
+            A batch of observations from the vectorized environment.
+
+        rewards : `np.ndarray` instance (dtype `np.float_`)
+            A vector of rewards from the vectorized environment.
+
+        dones : `np.ndarray` instance (dtype `np.bool_`)
+            A vector whose entries indicate whether the episode has ended.
+
+        infos : list of dict
+            A list of auxiliary diagnostic informations.
+        """
         observations, infos = [], []
         for i, action in enumerate(actions):
 
