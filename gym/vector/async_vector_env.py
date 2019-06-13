@@ -319,9 +319,11 @@ class AsyncVectorEnv(VectorEnv):
                     process.terminate()
         else:
             for pipe in self.parent_pipes:
-                pipe.send(('close', None))
+                if not pipe.closed:
+                    pipe.send(('close', None))
             for pipe in self.parent_pipes:
-                pipe.recv()
+                if not pipe.closed:
+                    pipe.recv()
 
         for pipe in self.parent_pipes:
             pipe.close()
@@ -338,7 +340,7 @@ class AsyncVectorEnv(VectorEnv):
         for pipe in self.parent_pipes:
             if timeout is not None:
                 delta = max(end_time - time.time(), 0)
-            if not pipe.poll(delta):
+            if pipe.closed or (not pipe.poll(delta)):
                 break
         else:
             return True
@@ -365,6 +367,7 @@ class AsyncVectorEnv(VectorEnv):
                 index, exctype, value = self.error_queue.get()
                 logger.error('Received the following error from Worker-{0}: '
                     '{1}: {2}'.format(index, exctype.__name__, value))
+                self.parent_pipes[index].close()
 
                 if (self.max_retries is not None) \
                         and (self._num_retries >= self.max_retries):
@@ -372,6 +375,9 @@ class AsyncVectorEnv(VectorEnv):
                     logger.error('The maximum number of retries has been '
                         'reached. Raising the last exception back to the main '
                         'process.')
+                    while not self.error_queue.empty():
+                        index, _, _ = self.error_queue.get()
+                        self.parent_pipes[index].close()
                     raise exctype(value)
 
                 logger.warn('Restarting Worker-{0}...'.format(index))
