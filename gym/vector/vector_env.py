@@ -63,6 +63,12 @@ class VectorEnv(gym.Env):
         self.call_async(name, *args, **kwargs)
         return self.call_wait()
 
+    def get_attr(self, name):
+        return self.call(name)
+
+    def set_attr(self, name, values):
+        raise NotImplementedError()
+
     def __del__(self):
         if hasattr(self, 'closed'):
             if not self.closed:

@@ -81,6 +81,17 @@ def test_call_sync_vector_env():
         assert use_shaped_reward[i]
 
 
+def test_set_attr_sync_vector_env():
+    env_fns = [make_env('CubeCrash-v0', i) for i in range(4)]
+    try:
+        env = SyncVectorEnv(env_fns)
+        env.set_attr('use_shaped_reward', [True, False, False, True])
+        use_shaped_reward = env.get_attr('use_shaped_reward')
+        assert use_shaped_reward == [True, False, False, True]
+    finally:
+        env.close()
+
+
 def test_check_observations_sync_vector_env():
     # CubeCrash-v0 - observation_space: Box(40, 32, 3)
     env_fns = [make_env('CubeCrash-v0', i) for i in range(8)]

@@ -127,6 +127,11 @@ class AsyncVectorEnv(VectorEnv):
             seeds = [seeds + i for i in range(self.num_envs)]
         assert len(seeds) == self.num_envs
 
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError('Calling `seed` while waiting '
+                'for a pending call to `{0}` to complete.'.format(
+                self._state.value), self._state.value)
+
         for pipe, seed in zip(self.parent_pipes, seeds):
             pipe.send(('seed', seed))
         for pipe in self.parent_pipes:
@@ -283,6 +288,33 @@ class AsyncVectorEnv(VectorEnv):
         self._state = AsyncState.DEFAULT
 
         return results
+
+    def set_attr(self, name, values):
+        """
+        Parameters
+        ----------
+        name : string
+            Name of the property to be set in each individual environment.
+
+        values : list or object
+            Values of the property to bet set to. If `values` is a list, then
+            it corresponds to the values for each individual environment,
+            otherwise a single value is set for all environments.
+        """
+        self._assert_is_running()
+        if not isinstance(values, list):
+            values = [values for _ in range(self.num_envs)]
+        assert len(values) == self.num_envs
+
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError('Calling `set_attr` while waiting '
+                'for a pending call to `{0}` to complete.'.format(
+                self._state.value), self._state.value)
+
+        for pipe, value in zip(self.parent_pipes, values):
+            pipe.send(('_setattr', (name, value)))
+        for pipe in self.parent_pipes:
+            pipe.recv()
 
     def close(self, timeout=None, terminate=False):
         """
@@ -453,6 +485,10 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue,
                     pipe.send(function(*args, **kwargs))
                 else:
                     pipe.send(function)
+            elif command == '_setattr':
+                name, value = data
+                setattr(env, name, value)
+                pipe.send(None)
             elif command == '_check_observation_space':
                 pipe.send(data == env.observation_space)
             elif command == '_restart':
@@ -470,7 +506,7 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue,
             else:
                 raise RuntimeError('Received unknown command `{0}`. Must '
                     'be one of {`reset`, `step`, `seed`, `close`, `_call`, '
-                    '`_check_observation_space`, `_restart`}.'.format(command))
+                    '`_setattr`, `_check_observation_space`, `_restart`}.'.format(command))
     except Exception:
         error_queue.put((index,) + sys.exc_info()[:2])
         pipe.send(None)
@@ -527,6 +563,10 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory,
                     pipe.send(function(*args, **kwargs))
                 else:
                     pipe.send(function)
+            elif command == '_setattr':
+                name, value = data
+                setattr(env, name, value)
+                pipe.send(None)
             elif command == '_check_observation_space':
                 pipe.send(data == observation_space)
             elif command == '_restart':
@@ -546,7 +586,7 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory,
             else:
                 raise RuntimeError('Received unknown command `{0}`. Must '
                     'be one of {`reset`, `step`, `seed`, `close`, `_call`, '
-                    '`_check_observation_space`, `_restart`}.'.format(command))
+                    '`_setattr`, `_check_observation_space`, `_restart`}.'.format(command))
     except Exception:
         error_queue.put((index,) + sys.exc_info()[:2])
         pipe.send(None)
