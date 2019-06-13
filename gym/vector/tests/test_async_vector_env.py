@@ -63,6 +63,30 @@ def test_step_async_vector_env(shared_memory):
 
 
 @pytest.mark.parametrize('shared_memory', [True, False])
+def test_call_async_vector_env(shared_memory):
+    env_fns = [make_env('CubeCrash-v0', i) for i in range(4)]
+    try:
+        env = AsyncVectorEnv(env_fns, shared_memory=shared_memory)
+        observations = env.reset()
+        images = env.call('render', mode='rgb_array')
+        use_shaped_reward = env.call('use_shaped_reward')
+    finally:
+        env.close()
+
+    assert isinstance(images, list)
+    assert len(images) == 4
+    for i in range(4):
+        assert isinstance(images[i], np.ndarray)
+        assert np.all(images[i] == observations[i])
+
+    assert isinstance(use_shaped_reward, list)
+    assert len(use_shaped_reward) == 4
+    for i in range(4):
+        assert isinstance(use_shaped_reward[i], bool)
+        assert use_shaped_reward[i]
+
+
+@pytest.mark.parametrize('shared_memory', [True, False])
 def test_copy_async_vector_env(shared_memory):
     env_fns = [make_env('CubeCrash-v0', i) for i in range(8)]
     try:

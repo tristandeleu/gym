@@ -7,8 +7,8 @@ from copy import deepcopy
 
 from gym import logger
 from gym.vector.vector_env import VectorEnv
-from gym.error import (AlreadySteppingError, AlreadyResettingError,
-                       NotSteppingError, NotResettingError, ClosedEnvironmentError)
+from gym.error import (AlreadyPendingCallError, NoAsyncCallError,
+                       ClosedEnvironmentError)
 from gym.vector.utils import (create_shared_memory, create_empty_array,
                               write_to_shared_memory, read_from_shared_memory,
                               concatenate, CloudpickleWrapper, clear_mpi_env_vars)
@@ -17,9 +17,10 @@ __all__ = ['AsyncVectorEnv']
 
 
 class AsyncState(Enum):
-    DEFAULT = 0
-    WAITING_RESET = 1
-    WAITING_STEP = 2
+    DEFAULT = 'default'
+    WAITING_RESET = 'reset'
+    WAITING_STEP = 'step'
+    WAITING_CALL = 'call'
 
 
 class AsyncVectorEnv(VectorEnv):
@@ -133,13 +134,10 @@ class AsyncVectorEnv(VectorEnv):
 
     def reset_async(self):
         self._assert_is_running()
-        if self._state == AsyncState.WAITING_STEP:
-            raise AlreadySteppingError('Calling `reset_async` while waiting '
-                'for a pending call to `step` to complete.')
-
-        if self._state == AsyncState.WAITING_RESET:
-            raise AlreadyResettingError('Calling `reset_async` while waiting '
-                'for a pending call to `reset` to complete.')
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError('Calling `reset_async` while waiting '
+                'for a pending call to `{0}` to complete'.format(
+                self._state.value), self._state.value)
 
         for pipe in self.parent_pipes:
             pipe.send(('reset', None))
@@ -160,15 +158,15 @@ class AsyncVectorEnv(VectorEnv):
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_RESET:
-            raise NotResettingError('Calling `reset_wait` without any prior '
-                'call to `reset_async`.')
+            raise NoAsyncCallError('Calling `reset_wait` without any prior '
+                'call to `reset_async`.', AsyncState.WAITING_RESET.value)
 
         if not self._poll(timeout):
             self._state = AsyncState.DEFAULT
             raise mp.TimeoutError('The call to `reset_wait` has timed out after '
                 '{0} second{1}.'.format(timeout, 's' if timeout > 1 else ''))
 
-        self._restart_if_errors(reset=True)
+        self._restart_if_errors()
         observations_list = [pipe.recv() for pipe in self.parent_pipes]
         self._state = AsyncState.DEFAULT
 
@@ -186,13 +184,10 @@ class AsyncVectorEnv(VectorEnv):
             List of actions.
         """
         self._assert_is_running()
-        if self._state == AsyncState.WAITING_RESET:
-            raise AlreadyResettingError('Calling `step_async` while waiting '
-                'for a pending call to `reset` to complete.')
-
-        if self._state == AsyncState.WAITING_STEP:
-            raise AlreadySteppingError('Calling `step_async` while waiting for '
-                'a pending call to `step` to complete.')
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError('Calling `step_async` while waiting '
+                'for a pending call to `{0}` to complete.'.format(
+                self._state.value), self._state.value)
 
         for pipe, action in zip(self.parent_pipes, actions):
             pipe.send(('step', action))
@@ -222,15 +217,15 @@ class AsyncVectorEnv(VectorEnv):
         """
         self._assert_is_running()
         if self._state != AsyncState.WAITING_STEP:
-            raise NotSteppingError('Calling `step_wait` without any prior call '
-                'to `step_async`.')
+            raise NoAsyncCallError('Calling `step_wait` without any prior call '
+                'to `step_async`.', AsyncState.WAITING_STEP.value)
 
         if not self._poll(timeout):
             self._state = AsyncState.DEFAULT
             raise mp.TimeoutError('The call to `step_wait` has timed out after '
                 '{0} second{1}.'.format(timeout, 's' if timeout > 1 else ''))
 
-        self._restart_if_errors(reset=False)
+        self._restart_if_errors()
         results = [pipe.recv() for pipe in self.parent_pipes]
         self._state = AsyncState.DEFAULT
         observations_list, rewards, dones, infos = zip(*results)
@@ -241,6 +236,53 @@ class AsyncVectorEnv(VectorEnv):
 
         return (deepcopy(self.observations) if self.copy else self.observations,
                 np.array(rewards), np.array(dones, dtype=np.bool_), infos)
+
+    def call_async(self, name, *args, **kwargs):
+        """
+        Parameters
+        ----------
+        name : string
+            Name of the method or property to call.
+        """
+        self._assert_is_running()
+        if self._state != AsyncState.DEFAULT:
+            raise AlreadyPendingCallError('Calling `call_async` while waiting '
+                'for a pending call to `{0}` to complete.'.format(
+                self._state.value), self._state.value)
+
+        for pipe in self.parent_pipes:
+            pipe.send(('_call', (name, args, kwargs)))
+        self._state = AsyncState.WAITING_CALL
+
+    def call_wait(self, timeout=None):
+        """
+        Parameters
+        ----------
+        timeout : int or float, optional
+            Number of seconds before the call to `step_wait` times out. If
+            `None`, the call to `step_wait` never times out.
+
+        Returns
+        -------
+        results : list
+            List of the results of the individual calls to the method or
+            property for each environment.
+        """
+        self._assert_is_running()
+        if self._state != AsyncState.WAITING_CALL:
+            raise NoAsyncCallError('Calling `call_wait` without any prior call '
+                'to `call_async`.', AsyncState.WAITING_CALL.value)
+
+        if not self._poll(timeout):
+            self._state = AsyncState.DEFAULT
+            raise mp.TimeoutError('The call to `call_wait` has timed out after '
+                '{0} second{1}.'.format(timeout, 's' if timeout > 1 else ''))
+
+        self._restart_if_errors()
+        results = [pipe.recv() for pipe in self.parent_pipes]
+        self._state = AsyncState.DEFAULT
+
+        return results
 
     def close(self, timeout=None, terminate=False):
         """
@@ -263,15 +305,11 @@ class AsyncVectorEnv(VectorEnv):
 
         timeout = 0 if terminate else timeout
         try:
-            if self._state == AsyncState.WAITING_RESET:
+            if self._state != AsyncState.DEFAULT:
                 logger.warn('Calling `close` while waiting for a pending '
-                    'call to `reset` to complete.')
-                self.reset_wait(timeout)
-
-            if self._state == AsyncState.WAITING_STEP:
-                logger.warn('Calling `close` while waiting for a pending '
-                    'call to `step` to complete.')
-                self.step_wait(timeout)
+                    'call to `{0}` to complete.'.format(self._state.value))
+                function = getattr(self, '{0}_wait'.format(self._state.value))
+                function(timeout)
         except mp.TimeoutError:
             terminate = True
 
@@ -321,7 +359,7 @@ class AsyncVectorEnv(VectorEnv):
             raise ClosedEnvironmentError('Trying to operate on `{0}`, after a '
                 'call to `close()`.'.format(type(self).__name__))
 
-    def _restart_if_errors(self, reset=True):
+    def _restart_if_errors(self):
         if not self.error_queue.empty():
             while not self.error_queue.empty():
                 index, exctype, value = self.error_queue.get()
@@ -338,7 +376,7 @@ class AsyncVectorEnv(VectorEnv):
 
                 logger.warn('Restarting Worker-{0}...'.format(index))
                 process, parent_pipe = self._start_process(index)
-                parent_pipe.send(('_restart', reset))
+                parent_pipe.send(('_restart', self._state))
 
                 self.processes[index] = process
                 self.parent_pipes[index] = parent_pipe
@@ -399,19 +437,33 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue,
             elif command == 'close':
                 pipe.send(None)
                 break
+            elif command == '_call':
+                name, args, kwargs = data
+                if name in ['reset', 'step', 'seed', 'close']:
+                    raise ValueError('Trying to call function `{0}` with '
+                        '`_call`. Use `{0}` directly instead.'.format(name))
+                function = getattr(env, name)
+                if callable(function):
+                    pipe.send(function(*args, **kwargs))
+                else:
+                    pipe.send(function)
             elif command == '_check_observation_space':
                 pipe.send(data == env.observation_space)
             elif command == '_restart':
                 observation = env.reset()
                 episode_done = True
-                if data:
+                if data == AsyncState.WAITING_RESET:
                     pipe.send(observation)
-                else:
+                elif data == AsyncState.WAITING_STEP:
                     infos = {'AsyncVectorEnv.restart': True}
                     pipe.send((observation, 0., True, infos))
+                elif data == AsyncState.WAITING_CALL:
+                    pipe.send(None)
+                else:
+                    raise NotImplementedError()
             else:
                 raise RuntimeError('Received unknown command `{0}`. Must '
-                    'be one of {`reset`, `step`, `seed`, `close`, '
+                    'be one of {`reset`, `step`, `seed`, `close`, `_call`, '
                     '`_check_observation_space`, `_restart`}.'.format(command))
     except Exception:
         error_queue.put((index,) + sys.exc_info()[:2])
@@ -459,20 +511,35 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory,
             elif command == 'close':
                 pipe.send(None)
                 break
+            elif command == '_call':
+                name, args, kwargs = data
+                if name in ['reset', 'step', 'seed', 'close']:
+                    raise ValueError('Trying to call function `{0}` with '
+                        '`_call`. Use `{0}` directly instead.'.format(name))
+                function = getattr(env, name)
+                if callable(function):
+                    pipe.send(function(*args, **kwargs))
+                else:
+                    pipe.send(function)
             elif command == '_check_observation_space':
                 pipe.send(data == observation_space)
             elif command == '_restart':
                 observation = env.reset()
                 write_to_shared_memory(index, observation, shared_memory,
                                        observation_space)
-                if data:
+                episode_done = True
+                if data == AsyncState.WAITING_RESET:
                     pipe.send(None)
-                else:
+                elif data == AsyncState.WAITING_STEP:
                     infos = {'AsyncVectorEnv.restart': True}
                     pipe.send((None, 0., True, infos))
+                elif data == AsyncState.WAITING_CALL:
+                    pipe.send(None)
+                else:
+                    raise NotImplementedError()
             else:
                 raise RuntimeError('Received unknown command `{0}`. Must '
-                    'be one of {`reset`, `step`, `seed`, `close`, '
+                    'be one of {`reset`, `step`, `seed`, `close`, `_call`, '
                     '`_check_observation_space`, `_restart`}.'.format(command))
     except Exception:
         error_queue.put((index,) + sys.exc_info()[:2])

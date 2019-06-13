@@ -135,6 +135,29 @@ class SyncVectorEnv(VectorEnv):
         return (np.copy(self.observations) if self.copy else self.observations,
             np.copy(self._rewards), np.copy(self._dones), infos)
 
+    def call(self, name, *args, **kwargs):
+        """
+        Parameters
+        ----------
+        name : string
+            Name of the method or property to call.
+
+        Returns
+        -------
+        results : list
+            List of the results of the individual calls to the method or
+            property for each environment.
+        """
+        results = []
+        for i in range(self.num_envs):
+            function = getattr(self.envs[i], name)
+            if callable(function):
+                results.append(function(*args, **kwargs))
+            else:
+                results.append(function)
+
+        return results
+
     def close(self):
         if self.closed:
             return

@@ -53,6 +53,16 @@ class VectorEnv(gym.Env):
         self.step_async(actions)
         return self.step_wait()
 
+    def call_async(self, name, *args, **kwargs):
+        pass
+
+    def call_wait(self, **kwargs):
+        raise NotImplementedError()
+
+    def call(self, name, *args, **kwargs):
+        self.call_async(name, *args, **kwargs)
+        return self.call_wait()
+
     def __del__(self):
         if hasattr(self, 'closed'):
             if not self.closed:
