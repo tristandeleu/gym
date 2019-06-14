@@ -493,10 +493,10 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue,
                 pipe.send(data == env.observation_space)
             elif command == '_restart':
                 observation = env.reset()
-                episode_done = True
                 if data == AsyncState.WAITING_RESET:
                     pipe.send(observation)
                 elif data == AsyncState.WAITING_STEP:
+                    episode_done = True
                     infos = {'AsyncVectorEnv.restart': True}
                     pipe.send((observation, 0., True, infos))
                 elif data == AsyncState.WAITING_CALL:
@@ -573,10 +573,10 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory,
                 observation = env.reset()
                 write_to_shared_memory(index, observation, shared_memory,
                                        observation_space)
-                episode_done = True
                 if data == AsyncState.WAITING_RESET:
                     pipe.send(None)
                 elif data == AsyncState.WAITING_STEP:
+                    episode_done = True
                     infos = {'AsyncVectorEnv.restart': True}
                     pipe.send((None, 0., True, infos))
                 elif data == AsyncState.WAITING_CALL:
