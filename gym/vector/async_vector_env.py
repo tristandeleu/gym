@@ -343,7 +343,7 @@ def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue):
                 pipe.send((observation, True))
             elif command == 'step':
                 observation, reward, done, info = env.step(data)
-                if done:
+                if np.all(done):
                     observation = env.reset()
                 pipe.send(((observation, reward, done, info), True))
             elif command == 'seed':
@@ -380,7 +380,7 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory, error
                 pipe.send((None, True))
             elif command == 'step':
                 observation, reward, done, info = env.step(data)
-                if done:
+                if np.all(done):
                     observation = env.reset()
                 write_to_shared_memory(index, observation, shared_memory,
                                        observation_space)
