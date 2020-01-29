@@ -43,8 +43,15 @@ class SyncVectorEnv(VectorEnv):
         self._check_observation_spaces()
         self.observations = create_empty_array(self.single_observation_space,
             n=self.num_envs, fn=np.zeros)
-        self._rewards = np.zeros((self.num_envs,), dtype=np.float64)
-        self._dones = np.zeros((self.num_envs,), dtype=np.bool_)
+        if isinstance(self.envs[0], SyncVectorEnv):
+            env = self.envs[0]
+            self._rewards = np.zeros((self.num_envs,) + env._rewards.shape,
+                                     dtype=np.float_)
+            self._dones = np.zeros((self.num_envs,) + env._dones.shape,
+                                   dtype=np.bool_)
+        else:
+            self._rewards = np.zeros((self.num_envs,), dtype=np.float_)
+            self._dones = np.zeros((self.num_envs,), dtype=np.bool_)
         self._actions = None
 
     def seed(self, seeds=None):
@@ -74,7 +81,7 @@ class SyncVectorEnv(VectorEnv):
         observations, infos = [], []
         for i, (env, action) in enumerate(zip(self.envs, self._actions)):
             observation, self._rewards[i], self._dones[i], info = env.step(action)
-            if self._dones[i]:
+            if np.all(self._dones[i]):
                 observation = env.reset()
             observations.append(observation)
             infos.append(info)

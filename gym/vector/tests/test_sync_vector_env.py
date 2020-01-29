@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+import gym
 
 from gym.spaces import Box
 from gym.vector.tests.utils import make_env
@@ -70,3 +71,29 @@ def test_check_observations_sync_vector_env():
     with pytest.raises(RuntimeError):
         env = SyncVectorEnv(env_fns)
         env.close()
+
+
+def test_nested_sync_sync_vector_env():
+    def make_vector_env():
+        return gym.vector.make('CubeCrash-v0', num_envs=5, asynchronous=False)
+    env_fns = [make_vector_env for i in range(3)]
+    try:
+        env = SyncVectorEnv(env_fns)
+        observations = env.reset()
+        actions = env.action_space.sample()
+        observations, rewards, dones, _ = env.step(actions)
+    finally:
+        env.close()
+
+    assert isinstance(env.observation_space, Box)
+    assert isinstance(observations, np.ndarray)
+    assert observations.dtype == env.observation_space.dtype
+    assert observations.shape == (3,) + env.single_observation_space.shape
+    assert observations.shape == env.observation_space.shape
+
+    assert isinstance(rewards, np.ndarray)
+    assert rewards.shape == (3, 5)
+
+    assert isinstance(dones, np.ndarray)
+    assert dones.dtype == np.bool_
+    assert dones.shape == (3, 5)
